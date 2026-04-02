@@ -1,39 +1,27 @@
 package com.aura.cloner;
 
-import android.util.Base64;
-
 import java.io.*;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.*;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
 import java.security.interfaces.RSAPublicKey;
 import java.util.*;
 import java.util.zip.*;
 
+import com.android.apksig.ApkSigner.SignerConfig;
+
 /**
- * On-Device APK Signer (JAR / v1 signing).
+ * On-Device APK Signer using Google's official apksig library.
  *
- * Key correctness requirements this implementation satisfies:
- *
- *  1. CERT.RSA is a proper PKCS#7 / CMS SignedData DER block (not raw bytes).
- *  2. Each ZIP entry preserves the original compression method (STORED vs DEFLATED).
- *     resources.arsc and native libs MUST be STORED or Android rejects the APK.
- *  3. STORED entries carry correct CRC-32, size and compressedSize metadata,
- *     which ZipOutputStream requires before calling putNextEntry().
- *  4. signatureAlgorithm in SignerInfo uses rsaEncryption (OID_RSA), not
- *     sha256WithRSAEncryption — matching the JAR-signing spec (RFC 2315).
- *  5. certificates [0] IMPLICIT correctly wraps the full Certificate DER.
+ * This implementation fixes "package appears to be invalid" on Android 11+
+ * which requires APK Signature Scheme v2/v3 signatures.
  */
 public class ApkSigner {
 
-    // -------------------------------------------------------------------------
-    // OID value bytes (inner content only, without the 0x06 tag)
-    // -------------------------------------------------------------------------
     private static final byte[] OID_RSA         = h("2a 86 48 86 f7 0d 01 01 01");
     private static final byte[] OID_SHA256_RSA  = h("2a 86 48 86 f7 0d 01 01 0b");
-    private static final byte[] OID_SHA256      = h("60 86 48 01 65 03 04 02 01");
-    private static final byte[] OID_SIGNED_DATA = h("2a 86 48 86 f7 0d 01 07 02");
-    private static final byte[] OID_DATA        = h("2a 86 48 86 f7 0d 01 07 01");
     private static final byte[] OID_CN          = h("55 04 03");
 
     // -------------------------------------------------------------------------
@@ -53,34 +41,12 @@ public class ApkSigner {
         }
     }
 
-    // -------------------------------------------------------------------------
-    // Public API
-    // -------------------------------------------------------------------------
-
     public static void signApk(File sourceApk, File targetApk, byte[] modifiedManifest)
             throws Exception {
 
-        /* 1. Generate ephemeral RSA-2048 key pair */
-        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA");
-        kpg.initialize(2048, new SecureRandom());
-        KeyPair kp  = kpg.generateKeyPair();
-        RSAPublicKey pub = (RSAPublicKey) kp.getPublic();
+        /* 1. Create an intermediate unsigned APK */
+        File unsignedApk = new File(targetApk.getParentFile(), "unsigned_" + targetApk.getName());
 
-        BigInteger serial = new BigInteger(64, new SecureRandom()).abs().add(BigInteger.ONE);
-        long now = System.currentTimeMillis();
-        long exp = now + 30L * 365 * 24 * 3600 * 1000; // 30 years
-
-        /* 2. Build self-signed X.509 certificate */
-        byte[] issuer = buildName("Aura Cloner");
-        byte[] spki   = buildSPKI(pub);
-        byte[] tbs    = buildTBS(serial, issuer, now, exp, spki);
-
-        Signature certSig = Signature.getInstance("SHA256withRSA");
-        certSig.initSign(kp.getPrivate());
-        certSig.update(tbs);
-        byte[] certDer = seq(tbs, algSha256Rsa(), bitStr(certSig.sign()));
-
-        /* 3. Collect APK entries — strip META-INF, preserve compression info */
         ZipFile zf = new ZipFile(sourceApk);
         List<Entry> entries = new ArrayList<>();
 
@@ -103,24 +69,22 @@ public class ApkSigner {
                 method = ZipEntry.STORED;
             } else {
                 data = readEntry(zf, ze);
-                crc  = ze.getCrc(); // use original CRC (already verified by ZipFile)
+                crc  = ze.getCrc(); // use original CRC
             }
 
             entries.add(new Entry(ze.getName(), data, method, crc));
         }
         zf.close();
 
-        /* 4. Write all entries preserving compression method */
+        /* Write all entries preserving compression method */
         ZipOutputStream zos = new ZipOutputStream(
-                new BufferedOutputStream(new FileOutputStream(targetApk)));
+                new BufferedOutputStream(new FileOutputStream(unsignedApk)));
 
         for (Entry e : entries) {
             ZipEntry out = new ZipEntry(e.name);
             out.setMethod(e.method);
 
             if (e.method == ZipEntry.STORED) {
-                // ZipOutputStream requires CRC, size, and compressedSize to be
-                // set BEFORE putNextEntry() for STORED entries — otherwise it throws.
                 out.setSize(e.data.length);
                 out.setCompressedSize(e.data.length);
                 out.setCrc(e.crc);
@@ -130,87 +94,51 @@ public class ApkSigner {
             zos.write(e.data);
             zos.closeEntry();
         }
-
-        /* 5. Build MANIFEST.MF */
-        MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
-        StringBuilder mfSb = new StringBuilder(
-                "Manifest-Version: 1.0\r\nCreated-By: 1.0 (Aura Cloner)\r\n\r\n");
-        for (Entry e : entries) {
-            sha256.reset();
-            mfSb.append("Name: ").append(e.name).append("\r\n");
-            mfSb.append("SHA-256-Digest: ")
-                    .append(Base64.encodeToString(sha256.digest(e.data), Base64.NO_WRAP))
-                    .append("\r\n\r\n");
-        }
-        byte[] mfBytes = mfSb.toString().getBytes(StandardCharsets.UTF_8);
-        addEntry(zos, "META-INF/MANIFEST.MF", mfBytes);
-
-        /* 6. Build CERT.SF */
-        sha256.reset();
-        byte[] sfBytes = ("Signature-Version: 1.0\r\n"
-                + "Created-By: 1.0 (Aura Cloner)\r\n"
-                + "SHA-256-Digest-Manifest: "
-                + Base64.encodeToString(sha256.digest(mfBytes), Base64.NO_WRAP)
-                + "\r\n\r\n").getBytes(StandardCharsets.UTF_8);
-        addEntry(zos, "META-INF/CERT.SF", sfBytes);
-
-        /* 7. Sign CERT.SF */
-        Signature sig = Signature.getInstance("SHA256withRSA");
-        sig.initSign(kp.getPrivate());
-        sig.update(sfBytes);
-        byte[] rawSig = sig.sign();
-
-        /* 8. PKCS#7 SignedData block → CERT.RSA */
-        addEntry(zos, "META-INF/CERT.RSA", buildPkcs7(rawSig, certDer, issuer, serial));
-
         zos.close();
+
+        /* 2. Generate RSA Key Pair and self-signed X.509 Certificate */
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA");
+        kpg.initialize(2048, new SecureRandom());
+        KeyPair kp  = kpg.generateKeyPair();
+        RSAPublicKey pub = (RSAPublicKey) kp.getPublic();
+
+        BigInteger serial = new BigInteger(64, new SecureRandom()).abs().add(BigInteger.ONE);
+        long now = System.currentTimeMillis();
+        long exp = now + 30L * 365 * 24 * 3600 * 1000; // 30 years
+
+        byte[] issuer = buildName("Aura Cloner");
+        byte[] spki   = buildSPKI(pub);
+        byte[] tbs    = buildTBS(serial, issuer, now, exp, spki);
+
+        Signature certSig = Signature.getInstance("SHA256withRSA");
+        certSig.initSign(kp.getPrivate());
+        certSig.update(tbs);
+        byte[] certDer = seq(tbs, algSha256Rsa(), bitStr(certSig.sign()));
+
+        CertificateFactory cf = CertificateFactory.getInstance("X.509");
+        X509Certificate cert = (X509Certificate) cf.generateCertificate(new ByteArrayInputStream(certDer));
+
+        /* 3. Sign the intermediate APK using official com.android.apksig.ApkSigner */
+        SignerConfig config = new SignerConfig.Builder(
+                "aura", kp.getPrivate(), Collections.singletonList(cert)
+        ).build();
+
+        com.android.apksig.ApkSigner signer = new com.android.apksig.ApkSigner.Builder(Collections.singletonList(config))
+                .setInputApk(unsignedApk)
+                .setOutputApk(targetApk)
+                .setV1SigningEnabled(true)
+                .setV2SigningEnabled(true)
+                .setV3SigningEnabled(true)
+                .build();
+
+        signer.sign();
+
+        /* Clean up intermediate file */
+        unsignedApk.delete();
     }
 
     // -------------------------------------------------------------------------
-    // PKCS#7 / CMS SignedData (DER-encoded)
-    // -------------------------------------------------------------------------
-
-    private static byte[] buildPkcs7(byte[] sig, byte[] certDer,
-            byte[] issuer, BigInteger serial) throws IOException {
-
-        /*
-         * SignerInfo per RFC 2315 §9.2:
-         *   version                  INTEGER (1)
-         *   issuerAndSerialNumber    IssuerAndSerialNumber
-         *   digestAlgorithm          AlgorithmIdentifier (SHA-256)
-         *   signatureAlgorithm       AlgorithmIdentifier (rsaEncryption — NOT sha256WithRSA)
-         *   signature                OCTET STRING
-         */
-        byte[] signerInfo = seq(
-                intDer(1),
-                seq(issuer, intDer(serial)),
-                algSha256(),   // digestAlgorithm
-                algRsa(),      // signatureAlgorithm = rsaEncryption
-                octet(sig)
-        );
-
-        /*
-         * SignedData:
-         *   version            1
-         *   digestAlgorithms   SET { SHA-256 }
-         *   contentInfo        { data OID, no content = detached }
-         *   certificates [0]   IMPLICIT — A0 wraps the full Certificate DER
-         *   signerInfos        SET { signerInfo }
-         */
-        byte[] signedData = seq(
-                intDer(1),
-                set(algSha256()),
-                seq(oid(OID_DATA)),
-                tlv(0xA0, certDer),  // [0] IMPLICIT: wrap certDer with A0 tag
-                set(signerInfo)
-        );
-
-        // ContentInfo = SEQUENCE { signedData OID, [0] EXPLICIT SignedData }
-        return seq(oid(OID_SIGNED_DATA), tlv(0xA0, signedData));
-    }
-
-    // -------------------------------------------------------------------------
-    // X.509 Certificate builders
+    // X.509 Certificate building (DER-encoded)
     // -------------------------------------------------------------------------
 
     private static byte[] buildName(String cn) throws IOException {
@@ -235,13 +163,7 @@ public class ApkSigner {
         );
     }
 
-    // -------------------------------------------------------------------------
-    // AlgorithmIdentifier helpers
-    // -------------------------------------------------------------------------
-
-    private static byte[] algSha256()    throws IOException { return seq(oid(OID_SHA256),    nul()); }
     private static byte[] algSha256Rsa() throws IOException { return seq(oid(OID_SHA256_RSA), nul()); }
-    private static byte[] algRsa()       throws IOException { return seq(oid(OID_RSA),        nul()); }
 
     // -------------------------------------------------------------------------
     // ASN.1 / DER primitives
@@ -271,9 +193,7 @@ public class ApkSigner {
     private static byte[] set(byte[]... parts) throws IOException { return tlv(0x31, cat(parts)); }
     private static byte[] oid(byte[] v)                           { return tlv(0x06, v); }
     private static byte[] nul()                                   { return new byte[]{0x05, 0x00}; }
-    private static byte[] octet(byte[] v)                         { return tlv(0x04, v); }
     private static byte[] utf8(String s) { return tlv(0x0C, s.getBytes(StandardCharsets.UTF_8)); }
-
     private static byte[] intDer(BigInteger n) { return tlv(0x02, n.toByteArray()); }
     private static byte[] intDer(int n)        { return intDer(BigInteger.valueOf(n)); }
 
@@ -308,16 +228,6 @@ public class ApkSigner {
     // -------------------------------------------------------------------------
     // ZIP helpers
     // -------------------------------------------------------------------------
-
-    private static void addEntry(ZipOutputStream zos, String name, byte[] data)
-            throws IOException {
-        ZipEntry ze = new ZipEntry(name);
-        // META-INF files are always DEFLATED (compressed)
-        ze.setMethod(ZipEntry.DEFLATED);
-        zos.putNextEntry(ze);
-        zos.write(data);
-        zos.closeEntry();
-    }
 
     private static byte[] readEntry(ZipFile zf, ZipEntry ze) throws IOException {
         try (DataInputStream dis = new DataInputStream(zf.getInputStream(ze))) {
