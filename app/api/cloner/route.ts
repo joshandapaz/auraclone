@@ -11,11 +11,9 @@ const JAVA_PATH = "C:\\Users\\HP\\.antigravity\\exx86_64\\bin\\java.exe";
 const APKTOOL_JAR = path.join(process.cwd(), "bin", "apktool.jar");
 const SIGNER_JAR = path.join(process.cwd(), "bin", "uber-apk-signer.jar");
 
-export const config = {
-  api: {
-    bodyParser: false, // Required for raw stream handling
-  },
-};
+// App Router API handlers use standard Request/Response objects and don't require the old 'config' export.
+export const dynamic = 'force-dynamic';
+
 
 export async function POST(req: Request) {
   try {
