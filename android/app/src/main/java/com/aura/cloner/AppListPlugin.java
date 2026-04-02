@@ -19,6 +19,7 @@ import java.io.*;
 import java.util.List;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
+import java.io.DataInputStream;
 
 @CapacitorPlugin(name = "AppList")
 public class AppListPlugin extends Plugin {
@@ -111,10 +112,12 @@ public class AppListPlugin extends Plugin {
                 ZipFile zipFile = new ZipFile(srcApk);
                 ZipEntry manifestEntry = zipFile.getEntry("AndroidManifest.xml");
                 
-                InputStream is = zipFile.getInputStream(manifestEntry);
+                // Use DataInputStream.readFully() to guarantee all bytes are read.
+                // A plain is.read() may return fewer bytes than requested on large files.
+                DataInputStream dis = new DataInputStream(zipFile.getInputStream(manifestEntry));
                 byte[] manifestBytes = new byte[(int) manifestEntry.getSize()];
-                is.read(manifestBytes);
-                is.close();
+                dis.readFully(manifestBytes);
+                dis.close();
                 zipFile.close();
 
                 // 2. Patch binary XML
