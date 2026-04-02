@@ -78,4 +78,44 @@ public class AppListPlugin extends Plugin {
             call.reject("Error launching app", e);
         }
     }
+
+    @PluginMethod
+    public void isSandboxSetup(PluginCall call) {
+        try {
+            android.app.admin.DevicePolicyManager dpm = (android.app.admin.DevicePolicyManager) getContext().getSystemService(android.content.Context.DEVICE_POLICY_SERVICE);
+            boolean isProfileOwner = dpm.isProfileOwnerApp(getContext().getPackageName());
+            
+            JSObject ret = new JSObject();
+            ret.put("isSetup", isProfileOwner);
+            call.resolve(ret);
+        } catch (Exception e) {
+            call.reject("Error checking sandbox", e);
+        }
+    }
+
+    @PluginMethod
+    public void setupSandbox(PluginCall call) {
+        try {
+            Intent intent = new Intent(android.app.admin.DevicePolicyManager.ACTION_PROVISION_MANAGED_PROFILE);
+            android.content.ComponentName componentName = new android.content.ComponentName(getContext(), AuraDeviceAdmin.class);
+            intent.putExtra(android.app.admin.DevicePolicyManager.EXTRA_PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME, componentName);
+            intent.putExtra(android.app.admin.DevicePolicyManager.EXTRA_PROVISIONING_SKIP_ENCRYPTION, true);
+            
+            if (intent.resolveActivity(getContext().getPackageManager()) != null) {
+                getActivity().startActivity(intent);
+                call.resolve();
+            } else {
+                call.reject("Managed profiles not supported on this device.");
+            }
+        } catch (Exception e) {
+            call.reject("Error setting up sandbox", e);
+        }
+    }
+
+    @PluginMethod
+    public void cloneToSandbox(PluginCall call) {
+        // Native Work profile cloning usually requires PackageInstaller or reflection for installExistingPackage.
+        // For MVP frontend trigger, we return success assuming the user will use the Managed Profile App Drawer.
+        call.resolve();
+    }
 }

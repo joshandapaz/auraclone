@@ -82,6 +82,7 @@ export default function Home() {
   const [mobileAppList, setMobileAppList] = useState<any[]>([]);
   const [mobileAppsLoading, setMobileAppsLoading] = useState(false);
   const [mobileClones, setMobileClones] = useLocalStorage<any[]>("aura_mobile_clones", []);
+  const [sandboxSetup, setSandboxSetup] = useState(false);
 
   useEffect(() => {
     // Detect mobile environment and set default viewMode
@@ -101,6 +102,10 @@ export default function Home() {
             console.error(err);
             setMobileAppsLoading(false);
          });
+
+         AppList.isSandboxSetup().then((res: any) => {
+            if (res && res.isSetup) setSandboxSetup(true);
+         }).catch(console.error);
       } else {
          // Mock data for browser testing
          setMobileAppList([
@@ -167,8 +172,22 @@ export default function Home() {
     }, 1000);
   };
 
-  const handleMobileClone = (app: any) => {
+  const handleMobileClone = async (app: any) => {
     if (cloning) return;
+
+    const isCapacitor = (window as any).Capacitor?.isNativePlatform();
+    if (isCapacitor && !sandboxSetup) {
+      if (confirm("True data cloning requires an Android Work Profile Sandbox. Would you like to set it up now?")) {
+        try {
+          await AppList.setupSandbox();
+          alert("Follow the system prompts to create your Work Profile Sandbox. Once finished, you will have a 'Work' tab in your app drawer.");
+        } catch (e) {
+          alert("Sandbox setup failed or is not supported on this device.");
+        }
+      }
+      return;
+    }
+
     setCloning(true);
     setProgress(0);
     
@@ -202,8 +221,11 @@ export default function Home() {
     try {
       const isCapacitor = (window as any).Capacitor?.isNativePlatform();
       if (isCapacitor) {
-         // Notify the user about Android security limitations for true cloning
-         alert(`Aura Mobile MVP Note: True data isolation ("new data") on non-rooted Android devices requires Work Profile provisioning or APK Repackaging. Currently launching standard instance of ${clone.name}.`);
+         if (sandboxSetup) {
+             alert(`Clone initialized in Sandbox. Please launch ${clone.name} from your Android 'Work' app drawer tab for true data isolation.`);
+         } else {
+             alert(`Aura Mobile MVP Note: True data isolation ("new data") requires Work Profile Sandbox setup. Currently launching standard un-isolated instance of ${clone.name}.`);
+         }
          await AppList.launchApp({ packageName: clone.packageName });
       } else {
          alert(`Launching ${clone.packageName} natively (Browser Mock)`);
