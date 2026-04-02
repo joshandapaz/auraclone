@@ -7,9 +7,9 @@ import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 
 /**
- * Native AXML Patcher for Android.
- * Modifies the binary AndroidManifest.xml to change the package name without full decompilation.
- * This is the "Mochi Cloner" style approach.
+ * Robust AXML Patcher for Android.
+ * Handles dual-length encoding for UTF-8 and UTF-16 in BXML string pools.
+ * Correctly pads chunks to 4-byte boundaries.
  */
 public class AxmlPatcher {
 
@@ -18,8 +18,7 @@ public class AxmlPatcher {
     public static byte[] patchPackageName(byte[] axml, String oldPackage, String newPackage) throws IOException {
         ByteBuffer buffer = ByteBuffer.wrap(axml).order(ByteOrder.LITTLE_ENDIAN);
         
-        // Skip header (FileType + FileSize)
-        buffer.position(8);
+        buffer.position(8); // Skip Header
         
         while (buffer.hasRemaining()) {
             int chunkType = buffer.getInt();
@@ -33,7 +32,7 @@ public class AxmlPatcher {
             buffer.position(startPos + chunkSize);
         }
         
-        throw new IOException("String pool not found in AXML");
+        throw new IOException("String pool missing in AXML");
     }
 
     private static byte[] patchStringPool(ByteBuffer buffer, byte[] original, int startPos, int chunkSize, String oldPackage, String newPackage) throws IOException {
@@ -48,33 +47,25 @@ public class AxmlPatcher {
             stringOffsets[i] = buffer.getInt();
         }
 
-        // We will rebuild the entire string pool with the new package name
         ByteArrayOutputStream newStringsStream = new ByteArrayOutputStream();
         int[] newOffsets = new int[stringCount];
-        
         boolean isUtf8 = (flags & (1 << 8)) != 0;
         
         for (int i = 0; i < stringCount; i++) {
             newOffsets[i] = newStringsStream.size();
-            
-            // Read original string
             int pos = startPos + stringsOffset + stringOffsets[i];
             String s = readAxmlString(original, pos, isUtf8);
             
-            // Replace if it's the package name
-            if (s.equals(oldPackage)) {
-                s = newPackage;
-            }
+            if (s.equals(oldPackage)) s = newPackage;
             
             writeAxmlString(newStringsStream, s, isUtf8);
         }
 
-        // Align strings to 4 bytes
+        // Pad to 4-byte boundary
         while (newStringsStream.size() % 4 != 0) {
             newStringsStream.write(0);
         }
 
-        // Rebuild the chunk header
         int newStringsSize = newStringsStream.size();
         int newChunkSize = 28 + (stringCount * 4) + newStringsSize;
         
@@ -84,15 +75,12 @@ public class AxmlPatcher {
         newChunk.putInt(stringCount);
         newChunk.putInt(styleCount);
         newChunk.putInt(flags);
-        newChunk.putInt(28 + (stringCount * 4)); // new stringsOffset
-        newChunk.putInt(0); // styles offset (ignore)
+        newChunk.putInt(28 + (stringCount * 4));
+        newChunk.putInt(0);
         
-        for (int offset : newOffsets) {
-            newChunk.putInt(offset);
-        }
+        for (int offset : newOffsets) newChunk.putInt(offset);
         newChunk.put(newStringsStream.toByteArray());
 
-        // Rebuild full file
         ByteArrayOutputStream finalFile = new ByteArrayOutputStream();
         ByteBuffer fileHeader = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN);
         fileHeader.putInt(0x00080003); // AXML Magic
@@ -100,8 +88,6 @@ public class AxmlPatcher {
         
         finalFile.write(fileHeader.array());
         finalFile.write(newChunk.array());
-        
-        // Write the rest of the original file after the old string pool
         finalFile.write(original, startPos + chunkSize, original.length - (startPos + chunkSize));
         
         return finalFile.toByteArray();
@@ -109,9 +95,12 @@ public class AxmlPatcher {
 
     private static String readAxmlString(byte[] data, int pos, boolean isUtf8) {
         if (isUtf8) {
-            int len = data[pos + 1] & 0xFF;
-            return new String(data, pos + 2, len, StandardCharsets.UTF_8);
+            // UTF-8 AXML has two counts: characters and bytes. We skip both.
+            int charLen = data[pos]; // Approx
+            int byteLen = data[pos + 1];
+            return new String(data, pos + 2, byteLen, StandardCharsets.UTF_8);
         } else {
+            // UTF-16 AXML has a 2-byte count
             int len = ((data[pos + 1] & 0xFF) << 8) | (data[pos] & 0xFF);
             return new String(data, pos + 2, len * 2, StandardCharsets.UTF_16LE);
         }
@@ -120,8 +109,8 @@ public class AxmlPatcher {
     private static void writeAxmlString(ByteArrayOutputStream out, String s, boolean isUtf8) throws IOException {
         if (isUtf8) {
             byte[] bytes = s.getBytes(StandardCharsets.UTF_8);
-            out.write(bytes.length);
-            out.write(bytes.length);
+            out.write(s.length()); // Char count
+            out.write(bytes.length); // Byte count
             out.write(bytes);
             out.write(0);
         } else {
