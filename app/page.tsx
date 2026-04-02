@@ -172,66 +172,94 @@ export default function Home() {
     }, 1000);
   };
 
+  const [showDeepCloneModal, setShowDeepCloneModal] = useState(false);
+  const [selectedMobileApp, setSelectedMobileApp] = useState<any>(null);
+  const [newDeepCloneName, setNewDeepCloneName] = useState("");
+
   const handleMobileClone = async (app: any) => {
-    if (cloning) return;
+    setSelectedMobileApp(app);
+    setNewDeepCloneName(`${app.name} Clone`);
+    setShowDeepCloneModal(true);
+  };
 
-    const isCapacitor = (window as any).Capacitor?.isNativePlatform();
-    if (isCapacitor && !sandboxSetup) {
-      if (confirm("True data cloning requires an Android Work Profile Sandbox. Would you like to set it up now?")) {
-        try {
-          await AppList.setupSandbox();
-          alert("Follow the system prompts to create your Work Profile Sandbox. Once finished, you will have a 'Work' tab in your app drawer.");
-        } catch (e) {
-          alert("Sandbox setup failed or is not supported on this device.");
-        }
-      }
-      return;
-    }
-
+  const startDeepClone = async () => {
+    if (!selectedMobileApp || !newDeepCloneName) return;
+    setShowDeepCloneModal(false);
     setCloning(true);
-    setProgress(0);
+    setProgress(5); // Start progress
     
-    // Simulate cloning process locally
-    let p = 0;
-    const int = setInterval(() => {
-      p += Math.random() * 8;
-      if (p >= 100) {
-        clearInterval(int);
-        setProgress(100);
-        setTimeout(() => {
-          setCloning(false);
-          setProgress(0);
-          
-          const newClone = {
-            id: Date.now(),
-            name: `${app.name} Clone`,
-            packageName: app.packageName,
-            createdAt: new Date().toISOString()
-          };
-          
-          setMobileClones((prev) => [newClone, ...prev]);
-        }, 500);
-      } else {
-        setProgress(Math.floor(p));
+    try {
+      const isCapacitor = (window as any).Capacitor?.isNativePlatform();
+      if (!isCapacitor) {
+        alert("Deep Cloning is only supported on a real Android device.");
+        setCloning(false);
+        return;
       }
-    }, 150);
+
+      // Step 1: Extract APK locally
+      setProgress(15);
+      const resApk = await AppList.getApkBase64({ path: selectedMobileApp.apkPath });
+      
+      // Step 2: Upload and Repackage on Server
+      setProgress(30);
+      const resClone = await fetch('/api/cloner', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'deepCloneApp',
+          payload: {
+            apkBase64: resApk.base64,
+            newName: newDeepCloneName,
+            originalPackage: selectedMobileApp.packageName
+          }
+        })
+      });
+      
+      if (!resClone.ok) throw new Error("Repackaging failed");
+      const cloneData = await resClone.json();
+      
+      if (!cloneData.success) throw new Error(cloneData.error);
+
+      // Step 3: Handle result
+      setProgress(90);
+      
+      // Tell user to install
+      alert(`Clone "${newDeepCloneName}" is ready! We will now trigger the Android system installer. Please follow the system prompts to install your isolated copy.`);
+      
+      // Note: In a production app, we would download the APK to the device's downloads folder 
+      // but for this MVP, we prompt the browser to "open" the generated APK link which Android handles.
+      // Or better, we can use a Capacitor plugin to download and call installApk.
+      const downloadUrl = window.location.origin + cloneData.url;
+      window.open(downloadUrl, "_blank");
+
+      const newClone = {
+        id: Date.now(),
+        name: newDeepCloneName,
+        packageName: cloneData.packageName, // The modified package name
+        createdAt: new Date().toISOString()
+      };
+      
+      setMobileClones((prev) => [newClone, ...prev]);
+      
+    } catch (e: any) {
+      alert("Deep Clone Error: " + e.message);
+    } finally {
+      setCloning(false);
+      setProgress(0);
+    }
   };
 
   const handleMobileLaunch = async (clone: any) => {
     try {
       const isCapacitor = (window as any).Capacitor?.isNativePlatform();
       if (isCapacitor) {
-         if (sandboxSetup) {
-             alert(`Clone initialized in Sandbox. Please launch ${clone.name} from your Android 'Work' app drawer tab for true data isolation.`);
-         } else {
-             alert(`Aura Mobile MVP Note: True data isolation ("new data") requires Work Profile Sandbox setup. Currently launching standard un-isolated instance of ${clone.name}.`);
-         }
+         alert(`Launching ${clone.name} (${clone.packageName}). If this was a deep clone, it will have its own independent data!`);
          await AppList.launchApp({ packageName: clone.packageName });
       } else {
          alert(`Launching ${clone.packageName} natively (Browser Mock)`);
       }
     } catch (e) {
-      alert("Error launching app natively.");
+      alert("Error: App might not be installed yet.");
     }
   };
 
@@ -452,6 +480,49 @@ export default function Home() {
               )}
             </div>
           </div>
+
+          <AnimatePresence>
+            {showDeepCloneModal && (
+              <motion.div 
+                initial={{ opacity: 0 }} 
+                animate={{ opacity: 1 }} 
+                exit={{ opacity: 0 }}
+                className="modal-overlay flex-center"
+                style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.8)', zIndex: 1000, padding: '20px' }}
+              >
+                <motion.div 
+                  initial={{ scale: 0.9, y: 20 }}
+                  animate={{ scale: 1, y: 0 }}
+                  className="glass"
+                  style={{ width: '100%', maxWidth: '400px', padding: '30px' }}
+                >
+                  <h3 style={{ fontSize: '1.4rem', marginBottom: '10px' }}>Deep Clone App</h3>
+                  <p className="dim" style={{ fontSize: '0.9rem', marginBottom: '25px' }}>
+                    This will create a physically new application on your device with 100% fresh data.
+                  </p>
+                  
+                  <div style={{ marginBottom: '25px' }}>
+                    <label className="dim" style={{ fontSize: '0.8rem', display: 'block', marginBottom: '8px' }}>CUSTOM DISPLAY NAME</label>
+                    <input 
+                      type="text" 
+                      className="input-field" 
+                      style={{ width: '100%' }}
+                      value={newDeepCloneName}
+                      onChange={(e) => setNewDeepCloneName(e.target.value)}
+                      placeholder="e.g. My Protected WhatsApp"
+                    />
+                  </div>
+
+                  <div style={{ display: 'flex', gap: '12px' }}>
+                    <button className="btn-secondary" style={{ flex: 1 }} onClick={() => setShowDeepCloneModal(false)}>Cancel</button>
+                    <button className="btn-primary" style={{ flex: 2, background: 'var(--accent-secondary)' }} onClick={startDeepClone}>
+                      Start Deep Clone
+                    </button>
+                  </div>
+                </motion.div>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </motion.section>
       )}
 

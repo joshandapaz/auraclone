@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { cloneApp, launchApp, getClones, getInstalledApps, uploadIcon } from '../../actions/cloner';
+import { cloneApp, launchApp, getClones, getInstalledApps, uploadIcon, deepCloneApp } from '../../actions/cloner';
 
 export async function POST(req: Request) {
   try {
@@ -28,6 +28,8 @@ export async function POST(req: Request) {
         return NextResponse.json(await cloneApp(payload.sourcePath, payload.destName, payload.iconUrl));
       case 'launchApp':
         return NextResponse.json(await launchApp(payload.cloneId, payload.exeName));
+      case 'deepCloneApp':
+        return NextResponse.json(await deepCloneApp(payload.apkBase64, payload.newName, payload.originalPackage));
       default:
         return NextResponse.json({ error: 'Unknown action' }, { status: 400 });
     }

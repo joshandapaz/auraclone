@@ -136,3 +136,78 @@ export async function launchApp(cloneId: number, exeName: string) {
     return { success: false, error: error.message };
   }
 }
+
+// --- Android Deep Cloning (APK Repackaging) ---
+
+const JAVA_PATH = "C:\\Users\\HP\\.antigravity\\exx86_64\\bin\\java.exe"; // Adjusted to found path
+const APKTOOL_JAR = path.join(process.cwd(), "bin", "apktool.jar");
+const SIGNER_JAR = path.join(process.cwd(), "bin", "uber-apk-signer.jar");
+
+export async function deepCloneApp(apkBase64: string, newName: string, originalPackage: string) {
+  const workDir = path.join(process.cwd(), "temp_clones", `${Date.now()}`);
+  const apkPath = path.join(workDir, "original.apk");
+  const unpackedDir = path.join(workDir, "unpacked");
+  const newPackage = `${originalPackage}.aura.clone`;
+  
+  try {
+    await fs.mkdir(workDir, { recursive: true });
+    
+    // 1. Write the original APK
+    const buffer = Buffer.from(apkBase64, 'base64');
+    await fs.writeFile(apkPath, buffer);
+    
+    // 2. Decompile
+    console.log("Decompiling...");
+    await execPromise(`"${JAVA_PATH}" -jar "${APKTOOL_JAR}" d "${apkPath}" -o "${unpackedDir}" -f`);
+    
+    // 3. Modify Manifest (Package Name)
+    console.log("Modifying Manifest...");
+    const manifestPath = path.join(unpackedDir, "AndroidManifest.xml");
+    let manifest = await fs.readFile(manifestPath, "utf-8");
+    manifest = manifest.replace(`package="${originalPackage}"`, `package="${newPackage}"`);
+    
+    // 4. Modify App Label (strings.xml)
+    // We attempt to find the app_name string and replace it
+    const stringsPath = path.join(unpackedDir, "res", "values", "strings.xml");
+    try {
+      let strings = await fs.readFile(stringsPath, "utf-8");
+      // This is a naive regex replacement for the app_name string
+      strings = strings.replace(/<string name="app_name">.*?<\/string>/, `<string name="app_name">${newName}</string>`);
+      await fs.writeFile(stringsPath, strings);
+    } catch (e) {
+      console.warn("Could not find strings.xml to rename app label, skipping.");
+    }
+    
+    await fs.writeFile(manifestPath, manifest);
+    
+    // 5. Rebuild
+    console.log("Rebuilding...");
+    const rebuiltApk = path.join(workDir, "rebuilt.apk");
+    await execPromise(`"${JAVA_PATH}" -jar "${APKTOOL_JAR}" b "${unpackedDir}" -o "${rebuiltApk}"`);
+    
+    // 6. Sign
+    console.log("Signing...");
+    await execPromise(`"${JAVA_PATH}" -jar "${SIGNER_JAR}" --apks "${rebuiltApk}"`);
+    
+    // uber-apk-signer names the output automatically
+    // It will be rebuilt-aligned-debugSigned.apk
+    const signedApkName = "rebuilt-aligned-debugSigned.apk";
+    const signedApkPath = path.join(workDir, signedApkName);
+    
+    // 7. Move to public for download
+    const publicDir = path.join(process.cwd(), "public", "clones");
+    await fs.mkdir(publicDir, { recursive: true });
+    const finalName = `${Date.now()}_clone.apk`;
+    const finalPath = path.join(publicDir, finalName);
+    
+    await fs.copyFile(signedApkPath, finalPath);
+    
+    // Cleanup temp files
+    await fs.rm(workDir, { recursive: true, force: true });
+    
+    return { success: true, url: `/clones/${finalName}`, packageName: newPackage };
+  } catch (error: any) {
+    console.error("Deep Clone Error:", error);
+    return { success: false, error: error.message };
+  }
+}

@@ -21,7 +21,6 @@ public class AppListPlugin extends Plugin {
     public void getInstalledApps(PluginCall call) {
         try {
             PackageManager pm = getContext().getPackageManager();
-            // GET_META_DATA | GET_PERMISSIONS gives us full app info
             List<PackageInfo> packages = pm.getInstalledPackages(PackageManager.GET_META_DATA);
             JSArray appsArray = new JSArray();
 
@@ -33,10 +32,7 @@ public class AppListPlugin extends Plugin {
                 boolean isUpdatedSystemApp = (appInfo.flags & ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0;
                 boolean hasLauncher = pm.getLaunchIntentForPackage(appInfo.packageName) != null;
 
-                // Include: user-installed apps, updated system apps, OR anything with a launcher
-                // Exclude: pure system apps with no launcher (they weren't installed by the user)
                 if (hasLauncher || isUpdatedSystemApp || !isSystemApp) {
-                    // Skip framework packages that have no name
                     String label = pm.getApplicationLabel(appInfo).toString().trim();
                     if (label.isEmpty()) continue;
 
@@ -44,7 +40,7 @@ public class AppListPlugin extends Plugin {
                     appObj.put("packageName", appInfo.packageName);
                     appObj.put("name", label);
                     appObj.put("versionName", pkgInfo.versionName != null ? pkgInfo.versionName : "");
-                    appObj.put("hasLauncher", hasLauncher);
+                    appObj.put("apkPath", appInfo.sourceDir); // Added for cloning
                     appsArray.put(appObj);
                 }
             }
@@ -80,42 +76,68 @@ public class AppListPlugin extends Plugin {
     }
 
     @PluginMethod
-    public void isSandboxSetup(PluginCall call) {
+    public void getApkBase64(PluginCall call) {
+        String path = call.getString("path");
+        if (path == null) {
+            call.reject("Path is required");
+            return;
+        }
+
         try {
-            android.app.admin.DevicePolicyManager dpm = (android.app.admin.DevicePolicyManager) getContext().getSystemService(android.content.Context.DEVICE_POLICY_SERVICE);
-            boolean isProfileOwner = dpm.isProfileOwnerApp(getContext().getPackageName());
-            
+            java.io.File file = new java.io.File(path);
+            if (!file.exists()) {
+                call.reject("File not found at: " + path);
+                return;
+            }
+
+            long length = file.length();
+            if (length > 150 * 1024 * 1024) { // 150MB limit for base64 transfer
+                call.reject("APK is too large for transmission (" + (length / 1024 / 1024) + "MB). Limit is 150MB.");
+                return;
+            }
+
+            byte[] bytes = new byte[(int) length];
+            java.io.FileInputStream fis = new java.io.FileInputStream(file);
+            fis.read(bytes);
+            fis.close();
+
+            String base64 = android.util.Base64.encodeToString(bytes, android.util.Base64.NO_WRAP);
             JSObject ret = new JSObject();
-            ret.put("isSetup", isProfileOwner);
+            ret.put("base64", base64);
             call.resolve(ret);
         } catch (Exception e) {
-            call.reject("Error checking sandbox", e);
+            call.reject("Error reading APK: " + e.getMessage());
         }
     }
 
     @PluginMethod
-    public void setupSandbox(PluginCall call) {
+    public void installApk(PluginCall call) {
+        String path = call.getString("path");
+        if (path == null) {
+            call.reject("Missing APK path");
+            return;
+        }
+
         try {
-            Intent intent = new Intent(android.app.admin.DevicePolicyManager.ACTION_PROVISION_MANAGED_PROFILE);
-            android.content.ComponentName componentName = new android.content.ComponentName(getContext(), AuraDeviceAdmin.class);
-            intent.putExtra(android.app.admin.DevicePolicyManager.EXTRA_PROVISIONING_DEVICE_ADMIN_COMPONENT_NAME, componentName);
-            intent.putExtra(android.app.admin.DevicePolicyManager.EXTRA_PROVISIONING_SKIP_ENCRYPTION, true);
-            
-            if (intent.resolveActivity(getContext().getPackageManager()) != null) {
-                getActivity().startActivity(intent);
-                call.resolve();
-            } else {
-                call.reject("Managed profiles not supported on this device.");
+            java.io.File file = new java.io.File(path);
+            if (!file.exists()) {
+                call.reject("APK file not found");
+                return;
             }
-        } catch (Exception e) {
-            call.reject("Error setting up sandbox", e);
-        }
-    }
 
-    @PluginMethod
-    public void cloneToSandbox(PluginCall call) {
-        // Native Work profile cloning usually requires PackageInstaller or reflection for installExistingPackage.
-        // For MVP frontend trigger, we return success assuming the user will use the Managed Profile App Drawer.
-        call.resolve();
+            android.net.Uri apkUri = androidx.core.content.FileProvider.getUriForFile(
+                getContext(), 
+                getContext().getPackageName() + ".fileprovider", 
+                file
+            );
+
+            Intent intent = new Intent(Intent.ACTION_INSTALL_PACKAGE);
+            intent.setData(apkUri);
+            intent.setFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+            getContext().startActivity(intent);
+            call.resolve();
+        } catch (Exception e) {
+            call.reject("Installation failed: " + e.getMessage());
+        }
     }
 }
