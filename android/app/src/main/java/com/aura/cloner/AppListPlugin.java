@@ -2,6 +2,7 @@ package com.aura.cloner;
 
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 
 import com.getcapacitor.JSArray;
@@ -20,14 +21,30 @@ public class AppListPlugin extends Plugin {
     public void getInstalledApps(PluginCall call) {
         try {
             PackageManager pm = getContext().getPackageManager();
-            List<ApplicationInfo> packages = pm.getInstalledApplications(PackageManager.GET_META_DATA);
+            // GET_META_DATA | GET_PERMISSIONS gives us full app info
+            List<PackageInfo> packages = pm.getInstalledPackages(PackageManager.GET_META_DATA);
             JSArray appsArray = new JSArray();
 
-            for (ApplicationInfo appInfo : packages) {
-                if (pm.getLaunchIntentForPackage(appInfo.packageName) != null) {
+            for (PackageInfo pkgInfo : packages) {
+                ApplicationInfo appInfo = pkgInfo.applicationInfo;
+                if (appInfo == null) continue;
+
+                boolean isSystemApp = (appInfo.flags & ApplicationInfo.FLAG_SYSTEM) != 0;
+                boolean isUpdatedSystemApp = (appInfo.flags & ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0;
+                boolean hasLauncher = pm.getLaunchIntentForPackage(appInfo.packageName) != null;
+
+                // Include: user-installed apps, updated system apps, OR anything with a launcher
+                // Exclude: pure system apps with no launcher (they weren't installed by the user)
+                if (hasLauncher || isUpdatedSystemApp || !isSystemApp) {
+                    // Skip framework packages that have no name
+                    String label = pm.getApplicationLabel(appInfo).toString().trim();
+                    if (label.isEmpty()) continue;
+
                     JSObject appObj = new JSObject();
                     appObj.put("packageName", appInfo.packageName);
-                    appObj.put("name", pm.getApplicationLabel(appInfo).toString());
+                    appObj.put("name", label);
+                    appObj.put("versionName", pkgInfo.versionName != null ? pkgInfo.versionName : "");
+                    appObj.put("hasLauncher", hasLauncher);
                     appsArray.put(appObj);
                 }
             }

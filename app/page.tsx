@@ -202,6 +202,8 @@ export default function Home() {
     try {
       const isCapacitor = (window as any).Capacitor?.isNativePlatform();
       if (isCapacitor) {
+         // Notify the user about Android security limitations for true cloning
+         alert(`Aura Mobile MVP Note: True data isolation ("new data") on non-rooted Android devices requires Work Profile provisioning or APK Repackaging. Currently launching standard instance of ${clone.name}.`);
          await AppList.launchApp({ packageName: clone.packageName });
       } else {
          alert(`Launching ${clone.packageName} natively (Browser Mock)`);

@@ -122,6 +122,9 @@ export async function launchApp(cloneId: number, exeName: string) {
     ...process.env,
     APPDATA: path.join(clone.appData, "Roaming"),
     LOCALAPPDATA: path.join(clone.appData, "Local"),
+    USERPROFILE: clone.appData,
+    HOMEDRIVE: clone.appData.substring(0, 2),
+    HOMEPATH: clone.appData.substring(clone.appData.indexOf('\\'))
   };
 
   const command = `start "" "${exePath}"`;
