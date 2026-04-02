@@ -28,14 +28,23 @@ jobs:
         run: npm install
 
       - name: Build Web App (Static Export)
+        env:
+          AURA_STATIC_EXPORT: true
         run: |
           npm run build
-          # Ensure 'out' directory exists for Capacitor
-          mkdir -p out
+          # Verify 'out' directory exists and has index.html
+          if [ ! -f out/index.html ]; then
+            echo "Error: Static export failed. out/index.html not found!"
+            exit 1
+          fi
 
       - name: Capacitor Android Sync
         run: |
-          npx cap add android || true
+          # Sync with the generated 'out' folder
+          # Ensure android platform is already present or add it
+          if [ ! -d "android" ]; then
+            npx cap add android
+          fi
           npx cap sync android
 
       - name: Build Android Debug APK
