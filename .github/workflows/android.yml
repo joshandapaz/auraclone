@@ -31,6 +31,9 @@ jobs:
         env:
           AURA_STATIC_EXPORT: true
         run: |
+          # Remove API routes for static mobile build (CI only)
+          # They cause conflicts with 'output: export' and aren't needed in the APK
+          rm -rf app/api
           npm run build
           # Verify 'out' directory exists and has index.html
           if [ ! -f out/index.html ]; then
