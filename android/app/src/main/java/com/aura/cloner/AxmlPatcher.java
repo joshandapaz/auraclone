@@ -98,7 +98,7 @@ public class AxmlPatcher {
         fileHeader.putInt(0x00080003); // AXML Magic
         fileHeader.putInt(original.length - chunkSize + newChunkSize);
         
-        finalFile.write(fileHeader.toByteArray());
+        finalFile.write(fileHeader.array());
         finalFile.write(newChunk.array());
         
         // Write the rest of the original file after the old string pool
