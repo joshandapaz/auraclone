@@ -4,6 +4,9 @@ import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
+import android.net.Uri;
+import android.os.Build;
+import androidx.core.content.FileProvider;
 
 import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
@@ -12,15 +15,10 @@ import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
-import java.io.BufferedOutputStream;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
+import java.io.*;
 import java.util.List;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 
 @CapacitorPlugin(name = "AppList")
 public class AppListPlugin extends Plugin {
@@ -48,15 +46,7 @@ public class AppListPlugin extends Plugin {
                     appObj.put("packageName", appInfo.packageName);
                     appObj.put("name", label);
                     appObj.put("versionName", pkgInfo.versionName != null ? pkgInfo.versionName : "");
-                    appObj.put("apkPath", appInfo.sourceDir);
-                    // Include split APKs if they exist (required for App Bundle installs)
-                    if (pkgInfo.splitNames != null && appInfo.splitSourceDirs != null) {
-                        JSArray splits = new JSArray();
-                        for (String splitPath : appInfo.splitSourceDirs) {
-                            splits.put(splitPath);
-                        }
-                        appObj.put("splitApkPaths", splits);
-                    }
+                    appObj.put("apkPath", appInfo.sourceDir); 
                     appsArray.put(appObj);
                 }
             }
@@ -92,121 +82,66 @@ public class AppListPlugin extends Plugin {
     }
 
     /**
-     * Streams the APK file to the desktop server in chunks via multipart/form-data.
-     * This avoids loading the entire APK into memory (no more OOM crashes).
-     * Supports files of any size (tested for 5GB+).
+     * Pure On-Device Cloning Orchestration.
+     * Extracts -> Patches -> Signs -> Installs.
+     * Removes all localhost dependencies.
      */
     @PluginMethod(returnType = PluginMethod.RETURN_CALLBACK)
-    public void uploadApkToServer(PluginCall call) {
+    public void cloneAppLocally(PluginCall call) {
         call.setKeepAlive(true);
-
-        String apkPath = call.getString("path");
-        String serverUrl = call.getString("serverUrl");
+        String sourcePath = call.getString("path");
+        String oldPackage = call.getString("originalPackage");
         String newName = call.getString("newName");
-        String originalPackage = call.getString("originalPackage");
+        String newPackage = oldPackage + ".cloner.clone"; // Dynamic suffix
 
-        if (apkPath == null || serverUrl == null || newName == null || originalPackage == null) {
-            call.reject("Missing required parameters: path, serverUrl, newName, originalPackage");
+        if (sourcePath == null || oldPackage == null) {
+            call.reject("Missing required parameters: path or originalPackage");
             return;
         }
 
         new Thread(() -> {
-            File file = new File(apkPath);
-            if (!file.exists()) {
-                call.reject("APK not found at: " + apkPath);
-                return;
-            }
-
-            String boundary = "----AuraBoundary" + System.currentTimeMillis();
-            long fileLength = file.length();
-
             try {
-                // ---- Notify upload starting ----
+                // 1. Report Progress: Copying Manifest
                 JSObject progress = new JSObject();
-                progress.put("stage", "uploading");
-                progress.put("percent", 0);
+                progress.put("stage", "patching");
+                progress.put("percent", 20);
                 call.resolve(progress);
 
-                URL url = new URL(serverUrl + "/api/cloner-upload");
-                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                conn.setRequestMethod("POST");
-                conn.setDoOutput(true);
-                conn.setChunkedStreamingMode(256 * 1024); // 256KB chunks - no pre-allocation
-                conn.setConnectTimeout(30000);
-                conn.setReadTimeout(600000); // 10 min for large apps
-                conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
-                conn.setRequestProperty("X-New-Name", newName);
-                conn.setRequestProperty("X-Original-Package", originalPackage);
+                File srcApk = new File(sourcePath);
+                ZipFile zipFile = new ZipFile(srcApk);
+                ZipEntry manifestEntry = zipFile.getEntry("AndroidManifest.xml");
+                
+                InputStream is = zipFile.getInputStream(manifestEntry);
+                byte[] manifestBytes = new byte[(int) manifestEntry.getSize()];
+                is.read(manifestBytes);
+                is.close();
+                zipFile.close();
 
-                OutputStream out = new BufferedOutputStream(conn.getOutputStream());
+                // 2. Patch binary XML
+                byte[] patchedManifest = AxmlPatcher.patchPackageName(manifestBytes, oldPackage, newPackage);
 
-                // Write text fields
-                writeField(out, boundary, "newName", newName);
-                writeField(out, boundary, "originalPackage", originalPackage);
+                // 3. Report Progress: Signing
+                JSObject signProgress = new JSObject();
+                signProgress.put("stage", "signing");
+                signProgress.put("percent", 60);
+                call.resolve(signProgress);
 
-                // Write APK file part (streamed)
-                String fileHeader = "--" + boundary + "\r\n"
-                    + "Content-Disposition: form-data; name=\"apk\"; filename=\"base.apk\"\r\n"
-                    + "Content-Type: application/vnd.android.package-archive\r\n\r\n";
-                out.write(fileHeader.getBytes("UTF-8"));
+                File outputApk = new File(getContext().getExternalCacheDir(), "clone_" + System.currentTimeMillis() + ".apk");
+                ApkSigner.signApk(srcApk, outputApk, patchedManifest);
 
-                // ---- Stream file in 1MB chunks ----
-                byte[] buffer = new byte[1024 * 1024]; // 1MB buffer
-                FileInputStream fis = new FileInputStream(file);
-                long bytesUploaded = 0;
-                int read;
-                int lastPercent = 0;
+                // 4. Report Progress: Done
+                JSObject done = new JSObject();
+                done.put("stage", "done");
+                done.put("percent", 100);
+                done.put("localPath", outputApk.getAbsolutePath());
+                done.put("newPackage", newPackage);
+                call.resolve(done);
+                call.setKeepAlive(false);
 
-                while ((read = fis.read(buffer)) != -1) {
-                    out.write(buffer, 0, read);
-                    bytesUploaded += read;
-
-                    int currentPercent = (int) ((bytesUploaded * 100) / fileLength);
-                    // Only notify every 5% to avoid flooding the bridge
-                    if (currentPercent >= lastPercent + 5) {
-                        lastPercent = currentPercent;
-                        JSObject uploadProgress = new JSObject();
-                        uploadProgress.put("stage", "uploading");
-                        uploadProgress.put("percent", currentPercent);
-                        call.resolve(uploadProgress);
-                    }
-                }
-                fis.close();
-
-                // End multipart
-                out.write(("\r\n--" + boundary + "--\r\n").getBytes("UTF-8"));
-                out.flush();
-                out.close();
-
-                // ---- Read server response ----
-                int responseCode = conn.getResponseCode();
-                if (responseCode == 200) {
-                    InputStream responseStream = conn.getInputStream();
-                    byte[] responseBytes = responseStream.readAllBytes();
-                    String responseBody = new String(responseBytes, "UTF-8");
-
-                    JSObject done = new JSObject();
-                    done.put("stage", "done");
-                    done.put("percent", 100);
-                    done.put("response", responseBody);
-                    call.resolve(done);
-                    call.setKeepAlive(false);
-                } else {
-                    call.reject("Server returned error: " + responseCode);
-                }
-
-                conn.disconnect();
             } catch (Exception e) {
-                call.reject("Upload failed: " + e.getMessage());
+                call.reject("Cloning failed on-device: " + e.getMessage());
             }
         }).start();
-    }
-
-    private void writeField(OutputStream out, String boundary, String name, String value) throws IOException {
-        String part = "--" + boundary + "\r\n"
-            + "Content-Disposition: form-data; name=\"" + name + "\"\r\n\r\n"
-            + value + "\r\n";
-        out.write(part.getBytes("UTF-8"));
     }
 
     @PluginMethod
@@ -220,13 +155,13 @@ public class AppListPlugin extends Plugin {
         try {
             File file = new File(path);
             if (!file.exists()) {
-                call.reject("APK file not found at: " + path);
+                call.reject("APK file not found");
                 return;
             }
 
-            android.net.Uri apkUri = androidx.core.content.FileProvider.getUriForFile(
-                getContext(),
-                getContext().getPackageName() + ".fileprovider",
+            Uri apkUri = FileProvider.getUriForFile(
+                getContext(), 
+                getContext().getPackageName() + ".fileprovider", 
                 file
             );
 

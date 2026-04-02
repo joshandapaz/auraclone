@@ -189,76 +189,70 @@ export default function Home() {
     setShowDeepCloneModal(false);
     setCloning(true);
     setProgress(5);
-    setCloneStage("uploading");
+    setCloneStage("Preparing...");
 
     try {
       const isCapacitor = (window as any).Capacitor?.isNativePlatform();
       if (!isCapacitor) {
-        alert("Deep Cloning is only supported on a real Android device running Aura.");
+        alert("Deep Cloning is only supported on a real Android device.");
         setCloning(false);
         return;
       }
 
-      const serverUrl = window.location.origin;
-
-      // Stream APK directly to server in chunks — no base64, no OOM crashes
+      // 1. Trigger the Pure On-Device Cloning Flow
+      // This is now handled entirely within the Android Native layer
       await new Promise<void>((resolve, reject) => {
-        AppList.uploadApkToServer({
+        AppList.cloneAppLocally({
           path: selectedMobileApp.apkPath,
-          serverUrl,
-          newName: newDeepCloneName,
           originalPackage: selectedMobileApp.packageName,
-        }, (event: any, err: any) => {
-          if (err) { reject(new Error(err)); return; }
-          if (event.stage === "uploading") {
-            // Map 0-100% upload to 5-70% progress
-            setProgress(5 + Math.floor(event.percent * 0.65));
-            setCloneStage("Uploading APK... " + event.percent + "%");
+          newName: newDeepCloneName
+        }, async (event: any, err: any) => {
+          if (err) {
+            reject(new Error(typeof err === 'string' ? err : JSON.stringify(err)));
+            return;
+          }
+
+          if (event.stage === "patching") {
+            setCloneStage("Patching Manifest...");
+            setProgress(30);
+          } else if (event.stage === "signing") {
+            setCloneStage("Signing App Bundle...");
+            setProgress(70);
           } else if (event.stage === "done") {
-            try {
-              const data = JSON.parse(event.response);
-              if (!data.success) { reject(new Error(data.error)); return; }
-              // Processing complete
-              setProgress(90);
-              setCloneStage("Finalizing clone...");
-
-              const downloadUrl = serverUrl + data.url;
+            setProgress(100);
+            setCloneStage("Complete!");
+            
+            // 2. Trigger Installation of the newly generated local clone
+            setTimeout(async () => {
+              alert(`Success! "${newDeepCloneName}" has been cloned directly on your device. Please follow the system prompt to install your separate copy.`);
+              await AppList.installApk({ path: event.localPath });
               
-              // Trigger Android download manager (browser open) to install
-              setTimeout(() => {
-                alert(`"${newDeepCloneName}" is ready! Install it from the download prompt.`);
-                window.open(downloadUrl, "_blank");
-
-                const newClone = {
-                  id: Date.now(),
-                  name: newDeepCloneName,
-                  packageName: data.packageName,
-                  createdAt: new Date().toISOString()
-                };
-                setMobileClones((prev: any) => [newClone, ...prev]);
-                resolve();
-              }, 500);
-            } catch (parseErr) {
-              reject(new Error("Invalid server response"));
-            }
+              const newClone = {
+                id: Date.now(),
+                name: newDeepCloneName,
+                packageName: event.newPackage,
+                createdAt: new Date().toISOString()
+              };
+              setMobileClones((prev: any) => [newClone, ...prev]);
+              resolve();
+            }, 500);
           }
         });
       });
 
     } catch (e: any) {
-      alert("Deep Clone Error: " + e.message);
+      alert("Pure On-Device Clone Error: " + e.message);
     } finally {
       setCloning(false);
       setProgress(0);
       setCloneStage("");
     }
   };
-
-  const handleMobileLaunch = async (clone: any) => {
+ Lively.launchApp = async (clone: any) => {
     try {
       const isCapacitor = (window as any).Capacitor?.isNativePlatform();
       if (isCapacitor) {
-         alert(`Launching ${clone.name} (${clone.packageName}). If this was a deep clone, it will have its own independent data!`);
+         alert(`Launching ${clone.name} (${clone.packageName}). This is a True Clone with isolated storage!`);
          await AppList.launchApp({ packageName: clone.packageName });
       } else {
          alert(`Launching ${clone.packageName} natively (Browser Mock)`);
