@@ -248,7 +248,7 @@ export default function Home() {
       setCloneStage("");
     }
   };
- Lively.launchApp = async (clone: any) => {
+  const handleMobileLaunch = async (clone: any) => {
     try {
       const isCapacitor = (window as any).Capacitor?.isNativePlatform();
       if (isCapacitor) {
