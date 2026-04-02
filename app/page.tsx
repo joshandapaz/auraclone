@@ -182,70 +182,75 @@ export default function Home() {
     setShowDeepCloneModal(true);
   };
 
+  const [cloneStage, setCloneStage] = useState(""); // "uploading" | "processing"
+
   const startDeepClone = async () => {
     if (!selectedMobileApp || !newDeepCloneName) return;
     setShowDeepCloneModal(false);
     setCloning(true);
-    setProgress(5); // Start progress
-    
+    setProgress(5);
+    setCloneStage("uploading");
+
     try {
       const isCapacitor = (window as any).Capacitor?.isNativePlatform();
       if (!isCapacitor) {
-        alert("Deep Cloning is only supported on a real Android device.");
+        alert("Deep Cloning is only supported on a real Android device running Aura.");
         setCloning(false);
         return;
       }
 
-      // Step 1: Extract APK locally
-      setProgress(15);
-      const resApk = await AppList.getApkBase64({ path: selectedMobileApp.apkPath });
-      
-      // Step 2: Upload and Repackage on Server
-      setProgress(30);
-      const resClone = await fetch('/api/cloner', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'deepCloneApp',
-          payload: {
-            apkBase64: resApk.base64,
-            newName: newDeepCloneName,
-            originalPackage: selectedMobileApp.packageName
+      const serverUrl = window.location.origin;
+
+      // Stream APK directly to server in chunks — no base64, no OOM crashes
+      await new Promise<void>((resolve, reject) => {
+        AppList.uploadApkToServer({
+          path: selectedMobileApp.apkPath,
+          serverUrl,
+          newName: newDeepCloneName,
+          originalPackage: selectedMobileApp.packageName,
+        }, (event: any, err: any) => {
+          if (err) { reject(new Error(err)); return; }
+          if (event.stage === "uploading") {
+            // Map 0-100% upload to 5-70% progress
+            setProgress(5 + Math.floor(event.percent * 0.65));
+            setCloneStage("Uploading APK... " + event.percent + "%");
+          } else if (event.stage === "done") {
+            try {
+              const data = JSON.parse(event.response);
+              if (!data.success) { reject(new Error(data.error)); return; }
+              // Processing complete
+              setProgress(90);
+              setCloneStage("Finalizing clone...");
+
+              const downloadUrl = serverUrl + data.url;
+              
+              // Trigger Android download manager (browser open) to install
+              setTimeout(() => {
+                alert(`"${newDeepCloneName}" is ready! Install it from the download prompt.`);
+                window.open(downloadUrl, "_blank");
+
+                const newClone = {
+                  id: Date.now(),
+                  name: newDeepCloneName,
+                  packageName: data.packageName,
+                  createdAt: new Date().toISOString()
+                };
+                setMobileClones((prev: any) => [newClone, ...prev]);
+                resolve();
+              }, 500);
+            } catch (parseErr) {
+              reject(new Error("Invalid server response"));
+            }
           }
-        })
+        });
       });
-      
-      if (!resClone.ok) throw new Error("Repackaging failed");
-      const cloneData = await resClone.json();
-      
-      if (!cloneData.success) throw new Error(cloneData.error);
 
-      // Step 3: Handle result
-      setProgress(90);
-      
-      // Tell user to install
-      alert(`Clone "${newDeepCloneName}" is ready! We will now trigger the Android system installer. Please follow the system prompts to install your isolated copy.`);
-      
-      // Note: In a production app, we would download the APK to the device's downloads folder 
-      // but for this MVP, we prompt the browser to "open" the generated APK link which Android handles.
-      // Or better, we can use a Capacitor plugin to download and call installApk.
-      const downloadUrl = window.location.origin + cloneData.url;
-      window.open(downloadUrl, "_blank");
-
-      const newClone = {
-        id: Date.now(),
-        name: newDeepCloneName,
-        packageName: cloneData.packageName, // The modified package name
-        createdAt: new Date().toISOString()
-      };
-      
-      setMobileClones((prev) => [newClone, ...prev]);
-      
     } catch (e: any) {
       alert("Deep Clone Error: " + e.message);
     } finally {
       setCloning(false);
       setProgress(0);
+      setCloneStage("");
     }
   };
 
@@ -413,7 +418,9 @@ export default function Home() {
             {cloning && (
                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} style={{ marginBottom: '20px' }}>
                  <div className="progress-container"><div className="progress-bar" style={{ width: `${progress}%`, background: 'var(--accent-secondary)' }}></div></div>
-                 <p style={{ fontSize: '0.75rem', textAlign: 'right', marginTop: '6px', color: 'var(--accent-secondary)' }}>{progress}% • Generating Isolated Sandbox...</p>
+                 <p style={{ fontSize: '0.75rem', textAlign: 'right', marginTop: '6px', color: 'var(--accent-secondary)' }}>
+                   {progress}% • {cloneStage || 'Deep Cloning in progress...'}
+                 </p>
                </motion.div>
             )}
 

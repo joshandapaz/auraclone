@@ -1,14 +1,30 @@
 import { NextResponse } from 'next/server';
-import { cloneApp, launchApp, getClones, getInstalledApps, uploadIcon, deepCloneApp } from '../../actions/cloner';
+import { writeFile, mkdir, rm, copyFile } from 'fs/promises';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+import path from 'path';
+import { cloneApp, launchApp, getClones, getInstalledApps, uploadIcon } from '../../actions/cloner';
+
+const execPromise = promisify(exec);
+
+const JAVA_PATH = "C:\\Users\\HP\\.antigravity\\exx86_64\\bin\\java.exe";
+const APKTOOL_JAR = path.join(process.cwd(), "bin", "apktool.jar");
+const SIGNER_JAR = path.join(process.cwd(), "bin", "uber-apk-signer.jar");
+
+export const config = {
+  api: {
+    bodyParser: false, // Required for raw stream handling
+  },
+};
 
 export async function POST(req: Request) {
   try {
     const contentType = req.headers.get('content-type') || '';
-    
+
     if (contentType.includes('multipart/form-data')) {
       const formData = await req.formData();
       const action = formData.get('action');
-      
+
       if (action === 'uploadIcon') {
         const result = await uploadIcon(formData);
         return NextResponse.json(result);
@@ -28,8 +44,6 @@ export async function POST(req: Request) {
         return NextResponse.json(await cloneApp(payload.sourcePath, payload.destName, payload.iconUrl));
       case 'launchApp':
         return NextResponse.json(await launchApp(payload.cloneId, payload.exeName));
-      case 'deepCloneApp':
-        return NextResponse.json(await deepCloneApp(payload.apkBase64, payload.newName, payload.originalPackage));
       default:
         return NextResponse.json({ error: 'Unknown action' }, { status: 400 });
     }
