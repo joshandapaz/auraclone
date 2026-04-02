@@ -1,4 +1,3 @@
-"use server";
 
 import { exec } from "child_process";
 import fs from "fs/promises";

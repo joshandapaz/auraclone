@@ -3,7 +3,28 @@
 import { useState, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Box, Copy, Play, Plus, Zap, Shield, HardDrive, Trash2, FolderOpen, Loader2, Sparkles, Image as ImageIcon, Monitor, Smartphone, Settings, Search } from "lucide-react";
-import { cloneApp, launchApp, getClones, getInstalledApps, uploadIcon } from "./actions/cloner";
+// API wrappers instead of server actions
+async function getClones() {
+  const res = await fetch('/api/cloner', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'getClones' }) });
+  return await res.json();
+}
+async function getInstalledApps() {
+  const res = await fetch('/api/cloner', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'getInstalledApps' }) });
+  return await res.json();
+}
+async function cloneApp(sourcePath: string, destName: string, iconUrl?: string) {
+  const res = await fetch('/api/cloner', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'cloneApp', payload: { sourcePath, destName, iconUrl } }) });
+  return await res.json();
+}
+async function launchApp(cloneId: number, exeName: string) {
+  const res = await fetch('/api/cloner', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'launchApp', payload: { cloneId, exeName } }) });
+  return await res.json();
+}
+async function uploadIcon(formData: FormData) {
+  formData.append('action', 'uploadIcon');
+  const res = await fetch('/api/cloner', { method: 'POST', body: formData });
+  return await res.json();
+}
 import AppDiscoveryModal from "./components/AppDiscoveryModal";
 import IconPicker from "./components/IconPicker";
 
