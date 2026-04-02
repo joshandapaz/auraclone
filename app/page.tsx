@@ -147,7 +147,7 @@ export default function Home() {
 
             <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
               <div>
-                <label className="dim" style={{ fontSize: '0.8rem', display: 'block', marginBottom: '8px', display: 'flex', justifyContent: 'space-between' }}>
+                <label className="dim" style={{ fontSize: '0.8rem', display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
                   SOURCE FOLDER PATH
                   <span onClick={handleDiscovery} style={{ color: 'var(--accent)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px' }}>
                     <Sparkles size={12} /> Auto-Discovery
