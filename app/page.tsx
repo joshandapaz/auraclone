@@ -80,6 +80,7 @@ export default function Home() {
 
   // Mobile Cloner States
   const [mobileAppList, setMobileAppList] = useState<any[]>([]);
+  const [mobileAppsLoading, setMobileAppsLoading] = useState(false);
   const [mobileClones, setMobileClones] = useLocalStorage<any[]>("aura_mobile_clones", []);
 
   useEffect(() => {
@@ -92,9 +93,14 @@ export default function Home() {
       
       // Load installed apps natively if on device
       if (isCapacitor) {
+         setMobileAppsLoading(true);
          AppList.getInstalledApps().then((res: any) => {
             if (res && res.apps) setMobileAppList(res.apps);
-         }).catch(console.error);
+            setMobileAppsLoading(false);
+         }).catch((err: any) => {
+            console.error(err);
+            setMobileAppsLoading(false);
+         });
       } else {
          // Mock data for browser testing
          setMobileAppList([
@@ -426,7 +432,7 @@ export default function Home() {
       )}
 
       {viewMode === "desktop" && <AppDiscoveryModal isOpen={showDiscovery} onClose={() => setShowDiscovery(false)} apps={installedApps} loading={loadingApps} onSelect={handleSelectApp} />}
-      <AllAppsModal isOpen={showAllApps} onClose={() => setShowAllApps(false)} apps={mobileAppList} onClone={handleMobileClone} />
+      <AllAppsModal isOpen={showAllApps} onClose={() => setShowAllApps(false)} apps={mobileAppList} onClone={handleMobileClone} loading={mobileAppsLoading} />
     </main>
   );
 }
