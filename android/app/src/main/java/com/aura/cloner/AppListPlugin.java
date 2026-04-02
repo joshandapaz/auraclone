@@ -16,10 +16,14 @@ import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
 import java.io.*;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.io.DataInputStream;
+import android.content.pm.PackageInstaller;
+import android.app.PendingIntent;
 
 @CapacitorPlugin(name = "AppList")
 public class AppListPlugin extends Plugin {
@@ -90,53 +94,77 @@ public class AppListPlugin extends Plugin {
     @PluginMethod(returnType = PluginMethod.RETURN_CALLBACK)
     public void cloneAppLocally(PluginCall call) {
         call.setKeepAlive(true);
-        String sourcePath = call.getString("path");
         String oldPackage = call.getString("originalPackage");
         String newName = call.getString("newName");
         String newPackage = oldPackage + ".cloner.clone"; // Dynamic suffix
 
-        if (sourcePath == null || oldPackage == null) {
-            call.reject("Missing required parameters: path or originalPackage");
+        if (oldPackage == null) {
+            call.reject("Missing required parameter: originalPackage");
             return;
         }
 
         new Thread(() -> {
             try {
-                // 1. Report Progress: Copying Manifest
+                // 1. Report Progress
                 JSObject progress = new JSObject();
-                progress.put("stage", "patching");
-                progress.put("percent", 20);
+                progress.put("stage", "fetching");
+                progress.put("percent", 10);
                 call.resolve(progress);
 
-                File srcApk = new File(sourcePath);
-                ZipFile zipFile = new ZipFile(srcApk);
-                ZipEntry manifestEntry = zipFile.getEntry("AndroidManifest.xml");
-                
-                // Use DataInputStream.readFully() to guarantee all bytes are read.
-                // A plain is.read() may return fewer bytes than requested on large files.
-                DataInputStream dis = new DataInputStream(zipFile.getInputStream(manifestEntry));
-                byte[] manifestBytes = new byte[(int) manifestEntry.getSize()];
-                dis.readFully(manifestBytes);
-                dis.close();
-                zipFile.close();
+                PackageManager pm = getContext().getPackageManager();
+                ApplicationInfo appInfo = pm.getApplicationInfo(oldPackage, 0);
 
-                // 2. Patch binary XML
-                byte[] patchedManifest = AxmlPatcher.patchPackageName(manifestBytes, oldPackage, newPackage);
+                List<String> allSrcPaths = new ArrayList<>();
+                allSrcPaths.add(appInfo.sourceDir);
+                if (appInfo.splitSourceDirs != null) {
+                    allSrcPaths.addAll(Arrays.asList(appInfo.splitSourceDirs));
+                }
 
-                // 3. Report Progress: Signing
-                JSObject signProgress = new JSObject();
-                signProgress.put("stage", "signing");
-                signProgress.put("percent", 60);
-                call.resolve(signProgress);
+                // Generate a single signing identity for the entire app bundle
+                ApkSigner.Identity identity = ApkSigner.generateIdentity();
+                JSArray outPaths = new JSArray();
 
-                File outputApk = new File(getContext().getExternalCacheDir(), "clone_" + System.currentTimeMillis() + ".apk");
-                ApkSigner.signApk(srcApk, outputApk, patchedManifest);
+                for (int i = 0; i < allSrcPaths.size(); i++) {
+                    String srcPath = allSrcPaths.get(i);
+                    File srcApk = new File(srcPath);
+                    
+                    // Progress
+                    JSObject iterProgress = new JSObject();
+                    iterProgress.put("stage", "patching_and_signing");
+                    iterProgress.put("percent", 20 + (int) (((i + 1) / (float) allSrcPaths.size()) * 70));
+                    call.resolve(iterProgress);
+
+                    ZipFile zipFile = new ZipFile(srcApk);
+                    ZipEntry manifestEntry = zipFile.getEntry("AndroidManifest.xml");
+                    
+                    byte[] manifestBytes = null;
+                    if (manifestEntry != null) {
+                        DataInputStream dis = new DataInputStream(zipFile.getInputStream(manifestEntry));
+                        manifestBytes = new byte[(int) manifestEntry.getSize()];
+                        dis.readFully(manifestBytes);
+                        dis.close();
+                    }
+                    zipFile.close();
+
+                    byte[] patchedManifest = manifestBytes;
+                    if (manifestBytes != null) {
+                        try {
+                            patchedManifest = AxmlPatcher.patchPackageName(manifestBytes, oldPackage, newPackage);
+                        } catch (IOException e) {
+                            // If string pool fails or oldPackage not found, keep original
+                        }
+                    }
+
+                    File outputApk = new File(getContext().getExternalCacheDir(), "clone_" + i + "_" + System.currentTimeMillis() + ".apk");
+                    ApkSigner.signApk(srcApk, outputApk, patchedManifest, identity);
+                    outPaths.put(outputApk.getAbsolutePath());
+                }
 
                 // 4. Report Progress: Done
                 JSObject done = new JSObject();
                 done.put("stage", "done");
                 done.put("percent", 100);
-                done.put("localPath", outputApk.getAbsolutePath());
+                done.put("localPaths", outPaths);
                 done.put("newPackage", newPackage);
                 call.resolve(done);
                 call.setKeepAlive(false);
@@ -149,32 +177,53 @@ public class AppListPlugin extends Plugin {
 
     @PluginMethod
     public void installApk(PluginCall call) {
-        String path = call.getString("path");
-        if (path == null) {
-            call.reject("Missing APK path");
-            return;
+        JSArray pathsArray = call.getArray("paths");
+        
+        // Backward compatibility for single path
+        if (pathsArray == null) {
+            String singlePath = call.getString("path");
+            if (singlePath == null) {
+                call.reject("Missing APK paths");
+                return;
+            }
+            pathsArray = new JSArray();
+            pathsArray.put(singlePath);
         }
 
         try {
-            File file = new File(path);
-            if (!file.exists()) {
-                call.reject("APK file not found");
-                return;
+            PackageInstaller packageInstaller = getContext().getPackageManager().getPackageInstaller();
+            PackageInstaller.SessionParams params = new PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL);
+            int sessionId = packageInstaller.createSession(params);
+
+            try (PackageInstaller.Session session = packageInstaller.openSession(sessionId)) {
+                for (int i = 0; i < pathsArray.length(); i++) {
+                    String path = pathsArray.getString(i);
+                    File file = new File(path);
+                    if (!file.exists()) continue;
+
+                    try (InputStream in = new FileInputStream(file);
+                         OutputStream out = session.openWrite(file.getName(), 0, file.length())) {
+                        byte[] buffer = new byte[65536];
+                        int c;
+                        while ((c = in.read(buffer)) != -1) {
+                            out.write(buffer, 0, c);
+                        }
+                        session.fsync(out);
+                    }
+                }
+
+                Intent intent = new Intent("com.aura.cloner.INSTALL_COMPLETE");
+                intent.setPackage(getContext().getPackageName());
+                int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    flags |= PendingIntent.FLAG_MUTABLE;
+                }
+                PendingIntent pendingIntent = PendingIntent.getBroadcast(getContext(), 0, intent, flags);
+                session.commit(pendingIntent.getIntentSender());
+                call.resolve();
             }
-
-            Uri apkUri = FileProvider.getUriForFile(
-                getContext(), 
-                getContext().getPackageName() + ".fileprovider", 
-                file
-            );
-
-            Intent intent = new Intent(Intent.ACTION_INSTALL_PACKAGE);
-            intent.setData(apkUri);
-            intent.setFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
-            getContext().startActivity(intent);
-            call.resolve();
         } catch (Exception e) {
-            call.reject("Installation failed: " + e.getMessage());
+            call.reject("Session Installation failed: " + e.getMessage());
         }
     }
 }

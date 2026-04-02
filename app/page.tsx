@@ -225,7 +225,7 @@ export default function Home() {
             // 2. Trigger Installation of the newly generated local clone
             setTimeout(async () => {
               alert(`Success! "${newDeepCloneName}" has been cloned directly on your device. Please follow the system prompt to install your separate copy.`);
-              await AppList.installApk({ path: event.localPath });
+              await AppList.installApk({ paths: event.localPaths });
               
               const newClone = {
                 id: Date.now(),

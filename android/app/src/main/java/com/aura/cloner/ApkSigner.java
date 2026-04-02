@@ -12,6 +12,13 @@ import java.util.zip.*;
 
 import com.android.apksig.ApkSigner.SignerConfig;
 
+class CountingOutputStream extends FilterOutputStream {
+    public long count = 0;
+    public CountingOutputStream(OutputStream out) { super(out); }
+    @Override public void write(int b) throws IOException { out.write(b); count++; }
+    @Override public void write(byte[] b, int off, int len) throws IOException { out.write(b, off, len); count += len; }
+}
+
 /**
  * On-Device APK Signer using Google's official apksig library.
  *
@@ -41,7 +48,45 @@ public class ApkSigner {
         }
     }
 
-    public static void signApk(File sourceApk, File targetApk, byte[] modifiedManifest)
+    // -------------------------------------------------------------------------
+    // Identity - Represents a single signing identity for the cloning session
+    // -------------------------------------------------------------------------
+    public static class Identity {
+        public final PrivateKey privateKey;
+        public final X509Certificate certificate;
+
+        public Identity(PrivateKey privateKey, X509Certificate certificate) {
+            this.privateKey = privateKey;
+            this.certificate = certificate;
+        }
+    }
+
+    public static Identity generateIdentity() throws Exception {
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA");
+        kpg.initialize(2048, new SecureRandom());
+        KeyPair kp  = kpg.generateKeyPair();
+        RSAPublicKey pub = (RSAPublicKey) kp.getPublic();
+
+        BigInteger serial = new BigInteger(64, new SecureRandom()).abs().add(BigInteger.ONE);
+        long now = System.currentTimeMillis();
+        long exp = now + 30L * 365 * 24 * 3600 * 1000; // 30 years
+
+        byte[] issuer = buildName("Aura Cloner");
+        byte[] spki   = buildSPKI(pub);
+        byte[] tbs    = buildTBS(serial, issuer, now, exp, spki);
+
+        Signature certSig = Signature.getInstance("SHA256withRSA");
+        certSig.initSign(kp.getPrivate());
+        certSig.update(tbs);
+        byte[] certDer = seq(tbs, algSha256Rsa(), bitStr(certSig.sign()));
+
+        CertificateFactory cf = CertificateFactory.getInstance("X.509");
+        X509Certificate cert = (X509Certificate) cf.generateCertificate(new ByteArrayInputStream(certDer));
+        
+        return new Identity(kp.getPrivate(), cert);
+    }
+
+    public static void signApk(File sourceApk, File targetApk, byte[] modifiedManifest, Identity identity)
             throws Exception {
 
         /* 1. Create an intermediate unsigned APK */
@@ -76,18 +121,47 @@ public class ApkSigner {
         }
         zf.close();
 
-        /* Write all entries preserving compression method */
-        ZipOutputStream zos = new ZipOutputStream(
-                new BufferedOutputStream(new FileOutputStream(unsignedApk)));
+        /* Write all entries preserving compression method & Zipalign */
+        CountingOutputStream cos = new CountingOutputStream(
+                new BufferedOutputStream(new FileOutputStream(unsignedApk), 65536));
+        ZipOutputStream zos = new ZipOutputStream(cos);
 
         for (Entry e : entries) {
+            zos.flush(); // ensure cos.count reflects exact written bytes so far
+            long headerStart = cos.count;
+
             ZipEntry out = new ZipEntry(e.name);
             out.setMethod(e.method);
+            out.setTime(0); // prevent ZIP64 or extended timestamp variation
 
             if (e.method == ZipEntry.STORED) {
                 out.setSize(e.data.length);
                 out.setCompressedSize(e.data.length);
                 out.setCrc(e.crc);
+            }
+
+            // Calculate precise padding for Zipalign
+            int alignment = (e.name.endsWith(".so")) ? 4096 : 4;
+            int headerSizeExceptExtra = 30 + e.name.getBytes(StandardCharsets.UTF_8).length;
+            
+            // By default, if time=0, ZipOutputStream adds no extra field, so original extraLen=0.
+            int offsetInsidePage = (int) ((headerStart + headerSizeExceptExtra) % alignment);
+            int paddingParams = (alignment - offsetInsidePage) % alignment;
+            
+            // To use standard ZIP alignment, we use an extra field ID 0xD935 (Android Zipalign).
+            // Format: ID (2 bytes) + Size (2 bytes) + Data (padding - 4 bytes)
+            if (paddingParams < 4 && paddingParams > 0) {
+                paddingParams += alignment; // Must be at least 4 bytes to hold the Extra header
+            }
+
+            if (paddingParams >= 4) {
+                byte[] extra = new byte[paddingParams];
+                extra[0] = (byte) 0x35;
+                extra[1] = (byte) 0xD9;
+                int dataSize = paddingParams - 4;
+                extra[2] = (byte) (dataSize & 0xFF);
+                extra[3] = (byte) ((dataSize >> 8) & 0xFF);
+                out.setExtra(extra);
             }
 
             zos.putNextEntry(out);
@@ -96,31 +170,9 @@ public class ApkSigner {
         }
         zos.close();
 
-        /* 2. Generate RSA Key Pair and self-signed X.509 Certificate */
-        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA");
-        kpg.initialize(2048, new SecureRandom());
-        KeyPair kp  = kpg.generateKeyPair();
-        RSAPublicKey pub = (RSAPublicKey) kp.getPublic();
-
-        BigInteger serial = new BigInteger(64, new SecureRandom()).abs().add(BigInteger.ONE);
-        long now = System.currentTimeMillis();
-        long exp = now + 30L * 365 * 24 * 3600 * 1000; // 30 years
-
-        byte[] issuer = buildName("Aura Cloner");
-        byte[] spki   = buildSPKI(pub);
-        byte[] tbs    = buildTBS(serial, issuer, now, exp, spki);
-
-        Signature certSig = Signature.getInstance("SHA256withRSA");
-        certSig.initSign(kp.getPrivate());
-        certSig.update(tbs);
-        byte[] certDer = seq(tbs, algSha256Rsa(), bitStr(certSig.sign()));
-
-        CertificateFactory cf = CertificateFactory.getInstance("X.509");
-        X509Certificate cert = (X509Certificate) cf.generateCertificate(new ByteArrayInputStream(certDer));
-
-        /* 3. Sign the intermediate APK using official com.android.apksig.ApkSigner */
+        /* 2. Sign the intermediate APK using official com.android.apksig.ApkSigner */
         SignerConfig config = new SignerConfig.Builder(
-                "aura", kp.getPrivate(), Collections.singletonList(cert)
+                "aura", identity.privateKey, Collections.singletonList(identity.certificate)
         ).build();
 
         com.android.apksig.ApkSigner signer = new com.android.apksig.ApkSigner.Builder(Collections.singletonList(config))
