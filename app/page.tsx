@@ -6,6 +6,7 @@ import { Box, Copy, Play, Plus, Zap, Shield, HardDrive, Trash2, FolderOpen, Load
 import { registerPlugin } from '@capacitor/core';
 import { useLocalStorage } from './hooks/useLocalStorage';
 import AppDiscoveryModal from "./components/AppDiscoveryModal";
+import AllAppsModal from "./components/AllAppsModal";
 import IconPicker from "./components/IconPicker";
 
 const AppList = registerPlugin<any>('AppList');
@@ -73,6 +74,9 @@ export default function Home() {
   const [installedApps, setInstalledApps] = useState<any[]>([]);
   const [loadingApps, setLoadingApps] = useState(false);
   const [clones, setClones] = useState<any[]>([]);
+
+  // Mobile All-Apps Modal
+  const [showAllApps, setShowAllApps] = useState(false);
 
   // Mobile Cloner States
   const [mobileAppList, setMobileAppList] = useState<any[]>([]);
@@ -356,7 +360,7 @@ export default function Home() {
             )}
 
             <div className="grid-cols" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(80px, 1fr))', gap: '12px', maxHeight: '400px', overflowY: 'auto', padding: '10px 0' }}>
-              {mobileAppList.slice(0, 50).map((app, i) => (
+              {mobileAppList.slice(0, 20).map((app, i) => (
                 <motion.div 
                   key={i}
                   whileTap={{ scale: 0.95 }}
@@ -372,6 +376,16 @@ export default function Home() {
                   </span>
                 </motion.div>
               ))}
+              {/* More Button — opens full app list */}
+              <motion.div 
+                whileTap={{ scale: 0.95 }}
+                className="glass flex-center" 
+                style={{ aspectRatio: '1/1', flexDirection: 'column', gap: '8px', cursor: 'pointer', border: '1px dashed var(--accent-secondary)' }}
+                onClick={() => setShowAllApps(true)}
+              >
+                <Plus size={20} color="var(--accent-secondary)" />
+                <span style={{ fontSize: '0.65rem', color: 'var(--accent-secondary)' }}>All Apps</span>
+              </motion.div>
             </div>
           </div>
 
@@ -412,6 +426,7 @@ export default function Home() {
       )}
 
       {viewMode === "desktop" && <AppDiscoveryModal isOpen={showDiscovery} onClose={() => setShowDiscovery(false)} apps={installedApps} loading={loadingApps} onSelect={handleSelectApp} />}
+      <AllAppsModal isOpen={showAllApps} onClose={() => setShowAllApps(false)} apps={mobileAppList} onClone={handleMobileClone} />
     </main>
   );
 }
